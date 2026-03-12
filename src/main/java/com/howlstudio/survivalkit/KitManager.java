@@ -9,52 +9,29 @@ import com.hypixel.hytale.server.core.universe.world.storage.EntityStore;
 import java.nio.file.*; import java.util.*;
 public class KitManager {
     private final Path dataDir;
-    private final Map<String,Kit> kits=new LinkedHashMap<>();
-    private final Map<UUID,Map<String,Long>> claimed=new HashMap<>();
-    public KitManager(Path d){this.dataDir=d;try{Files.createDirectories(d);}catch(Exception e){}loadDefaults();load();}
-    private void loadDefaults(){
-        kits.put("starter",new Kit("starter","Starter Kit","Basic survival gear for new players",0,List.of("sword","pickaxe","axe","food_x16","torches_x32")));
-        kits.put("pvp",new Kit("pvp","PvP Kit","Combat gear",3*3600_000L,List.of("iron_sword","iron_armor","golden_apple_x2","bow","arrows_x32")));
-        kits.put("builder",new Kit("builder","Builder Kit","Building essentials",6*3600_000L,List.of("wood_x64","stone_x64","glass_x32","torches_x64","shovel","pickaxe")));
-    }
-    public int getKitCount(){return kits.size();}
-    public boolean canClaim(UUID uid,Kit k){
-        if(k.getCooldownMs()<0)return true;
-        Map<String,Long> m=claimed.computeIfAbsent(uid,x->new HashMap<>());
-        Long last=m.get(k.getId());if(last==null)return true;
-        if(k.isOneTime())return false;
-        return System.currentTimeMillis()-last>=k.getCooldownMs();
-    }
-    public long cooldownLeft(UUID uid,Kit k){
-        Map<String,Long> m=claimed.getOrDefault(uid,Map.of());
-        Long last=m.get(k.getId());if(last==null)return 0;
-        return Math.max(0,k.getCooldownMs()-(System.currentTimeMillis()-last));
-    }
-    public void claim(UUID uid,Kit k){claimed.computeIfAbsent(uid,x->new HashMap<>()).put(k.getId(),System.currentTimeMillis());save();}
-    public void save(){try{StringBuilder sb=new StringBuilder();for(Kit k:kits.values())sb.append(k.toConfig()).append("\n");Files.writeString(dataDir.resolve("kits.txt"),sb.toString());}catch(Exception e){}}
-    private void load(){try{Path f=dataDir.resolve("kits.txt");if(!Files.exists(f))return;kits.clear();for(String l:Files.readAllLines(f)){Kit k=Kit.fromConfig(l);if(k!=null)kits.put(k.getId(),k);}}catch(Exception e){}}
-    public AbstractPlayerCommand getKitCommand(){
-        return new AbstractPlayerCommand("kit","Claim a kit. /kit list | /kit <name>"){
+    private final List<String> kitItems=new ArrayList<>();
+    private final Set<UUID> givenTo=new HashSet<>();
+    private boolean autoGiveFirstJoin=true;
+    public KitManager(Path d){this.dataDir=d;try{Files.createDirectories(d);}catch(Exception e){}setDefaultKit();load();}
+    private void setDefaultKit(){kitItems.add("Wooden Sword x1");kitItems.add("Wooden Pickaxe x1");kitItems.add("Wooden Axe x1");kitItems.add("Bread x8");kitItems.add("Torch x16");}
+    public int getKitItemCount(){return kitItems.size();}
+    public boolean hasReceived(UUID uid){return givenTo.contains(uid);}
+    public void giveKit(PlayerRef ref){givenTo.add(ref.getUuid());ref.sendMessage(Message.raw("§6[SurvivalKit] §rYou received your starter kit!"));for(String item:kitItems)ref.sendMessage(Message.raw("  + §e"+item));save();}
+    public void save(){try{StringBuilder sb=new StringBuilder("autoGive="+autoGiveFirstJoin+"\n");for(String i:kitItems)sb.append("item="+i+"\n");for(UUID u:givenTo)sb.append("given="+u+"\n");Files.writeString(dataDir.resolve("kit.txt"),sb.toString());}catch(Exception e){}}
+    private void load(){try{Path f=dataDir.resolve("kit.txt");if(!Files.exists(f))return;kitItems.clear();for(String l:Files.readAllLines(f)){if(l.startsWith("item="))kitItems.add(l.substring(5));else if(l.startsWith("given="))try{givenTo.add(UUID.fromString(l.substring(6)));}catch(Exception e){}else if(l.startsWith("autoGive="))autoGiveFirstJoin=Boolean.parseBoolean(l.substring(9));}}catch(Exception e){}}
+    public AbstractPlayerCommand getKitAdminCommand(){
+        return new AbstractPlayerCommand("starterkit","[Admin] Manage starter kit. /starterkit list|add <item>|reset <player>|toggle"){
             @Override protected void execute(CommandContext ctx,Store<EntityStore> store,Ref<EntityStore> ref,PlayerRef playerRef,World world){
-                String input=ctx.getInputString().trim();
-                if(input.isEmpty()||input.equalsIgnoreCase("list")){
-                    playerRef.sendMessage(Message.raw("=== Available Kits ==="));
-                    for(Kit k:kits.values()){
-                        boolean can=canClaim(playerRef.getUuid(),k);
-                        String cd=can?"§aAvailable":"§c"+(k.isOneTime()?"Claimed":"CD: "+cooldownLeft(playerRef.getUuid(),k)/60_000+"m")+"§r";
-                        playerRef.sendMessage(Message.raw("  §6"+k.getName()+"§r — "+k.getDescription()+" ["+cd+"§r]"));
-                    }
-                    return;
+                String[]args=ctx.getInputString().trim().split("\\s+",2); String sub=args.length>0?args[0].toLowerCase():"list";
+                switch(sub){
+                    case"list"->{playerRef.sendMessage(Message.raw("[StarterKit] Items (autoGive="+autoGiveFirstJoin+"):"));for(int i=0;i<kitItems.size();i++)playerRef.sendMessage(Message.raw("  "+(i+1)+". "+kitItems.get(i)));}
+                    case"add"->{if(args.length<2)break;kitItems.add(args[1]);save();playerRef.sendMessage(Message.raw("[StarterKit] Added: "+args[1]));}
+                    case"toggle"->{autoGiveFirstJoin=!autoGiveFirstJoin;save();playerRef.sendMessage(Message.raw("[StarterKit] Auto-give first join: "+autoGiveFirstJoin));}
+                    case"given"->{playerRef.sendMessage(Message.raw("[StarterKit] Kit given to "+givenTo.size()+" players."));}
+                    default->playerRef.sendMessage(Message.raw("Usage: /starterkit list|add <item>|toggle|given"));
                 }
-                Kit k=kits.get(input.toLowerCase());
-                if(k==null){playerRef.sendMessage(Message.raw("[Kit] Unknown kit. Use /kit list."));return;}
-                if(!canClaim(playerRef.getUuid(),k)){
-                    long left=cooldownLeft(playerRef.getUuid(),k);
-                    playerRef.sendMessage(Message.raw("[Kit] "+(k.isOneTime()?"Already claimed.":"Cooldown: "+left/60_000+"m remaining.")));return;}
-                claim(playerRef.getUuid(),k);
-                playerRef.sendMessage(Message.raw("[Kit] Claimed: §6"+k.getName()+"§r! Items: "+String.join(", ",k.getItems())));
-                System.out.println("[SurvivalKit] "+playerRef.getUsername()+" claimed kit: "+k.getId());
             }
         };
     }
+    public boolean isAutoGive(){return autoGiveFirstJoin;}
 }
